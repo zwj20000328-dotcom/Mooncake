@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -53,7 +54,16 @@ class KvClientObjectStorageAdapter final : public ObjectStorageAdapter {
 
     kv::BinaryKey MakeCacheKey(std::string_view logical_key) const;
     Completion waitForCompletion(kv::TaskId task_id, size_t entry_count);
-    static ErrorCode ToErrorCode(const kv::Status& status);
+    // Store entries share the SDK's entry decoder with loads, so the codes that
+    // mean "object missing" on a read mean "store failed" on a write. Callers
+    // must state the direction; the parameter deliberately has no default, so a
+    // new write site cannot silently inherit the read mapping.
+    static ErrorCode ToErrorCode(const kv::Status& status, bool is_write);
+    // Registers one host range with the SDK; the returned handle stays valid
+    // until it is passed to UnregisterBuffers.
+    tl::expected<uint64_t, ErrorCode> RegisterBuffers(void* ptr, size_t size);
+    // Releases the handles, logging any failure the SDK cannot retry.
+    void UnregisterBuffers(const std::vector<uint64_t>& handles);
 
     KvClientAdapterConfig config_;
     std::unique_ptr<kv::KvClient> kv_client_;

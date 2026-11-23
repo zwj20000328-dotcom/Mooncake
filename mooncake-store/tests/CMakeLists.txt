@@ -482,6 +482,15 @@ else()
   target_compile_definitions(kvcs_object_storage_adapter_test
                              PRIVATE MOONCAKE_KVCS_TEST_SDK=1)
 endif()
+# The kvclient adapter test includes the SDK headers, so it only builds when
+# the SDK was detected. mooncake_store links Mooncake::kvclient PRIVATE, which
+# does not propagate the include directories, so link it here as well.
+if(MOONCAKE_KVCLIENT_SDK_FOUND)
+  add_store_test(kvclient_object_storage_adapter_test
+                 kvclient_object_storage_adapter_test.cpp)
+  target_link_libraries(kvclient_object_storage_adapter_test
+                        PRIVATE Mooncake::kvclient Mooncake::xxhash)
+endif()
 add_store_test(mutex_test mutex_test.cpp)
 add_store_test(file_storage_test file_storage_test.cpp)
 add_store_test(file_storage_config_test file_storage_config_test.cpp)
