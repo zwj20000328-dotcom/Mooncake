@@ -8,6 +8,7 @@
 #include <thread>
 #include <stop_token>
 
+#include <gflags/gflags.h>
 #include <dlfcn.h>  // for dlsym (Python detection)
 #include <cstdlib>  // for atexit
 #include <cstring>
@@ -116,11 +117,7 @@ bool IsHostStoreSegmentProtocol(const std::string &protocol) {
 #ifdef USE_ASCEND_DIRECT
 // Split standalone store capacity across NPUs: cap each mount at total/n.
 size_t AgentModeStoreChunkCap(size_t total_size) {
-    const uint32_t n = ContextManager::getInstance().getDeviceCount();
-    if (n <= 1 || total_size == 0) {
-        return 0;
-    }
-    return total_size / n;
+    return ascend_agent_mode_store_chunk_cap(total_size);
 }
 
 bool RestoreAgentModeDeviceZero() {
@@ -523,6 +520,13 @@ inline QueryResult FilterQueryResult(const QueryResult &qr,
         qr.lease_timeout,
         include_object_checksum ? qr.object_checksum : std::nullopt,
         qr.resolved_tenant_id);
+}
+
+bool IsLocalDiskMasterLeaseExpired(const QueryResult &query_result,
+                                   const std::string &key) {
+    if (!query_result.IsLeaseExpired()) return false;
+    LOG(WARNING) << "lease_expired_before_data_transfer_completed key=" << key;
+    return true;
 }
 
 // Shared object-byte range overflow check (same semantics as
@@ -1513,7 +1517,10 @@ tl::expected<void, ErrorCode> RealClient::setup_internal(
                     << "sunrise_link protocol requires USE_SUNRISE build";
                 return tl::unexpected(ErrorCode::INVALID_PARAMS);
 #endif
-            } else if (this->protocol == "ub") {
+            } else if (this->protocol == "ub" && !use_mmap_segment) {
+                // Only allocate_buffer_allocator_memory() memory goes back
+                // through the UB free path; hugepage mmaps fall through to
+                // munmap below.
                 ub_segment_ptrs_.emplace_back(ptr,
                                               UbSegmentDeleter{mapped_size});
             } else if (use_mmap_segment) {
@@ -4114,6 +4121,9 @@ std::shared_ptr<BufferHandle> RealClient::get_buffer_internal(
                        << "': " << toString(checksum_result.error());
             return nullptr;
         }
+        if (IsLocalDiskMasterLeaseExpired(query_result.value(), key)) {
+            return nullptr;
+        }
         return buffer_handle;
     }
 
@@ -4629,6 +4639,11 @@ RealClient::batch_get_buffer_internal(
                             tl::make_unexpected(checksum_result.error());
                         continue;
                     }
+                    if (IsLocalDiskMasterLeaseExpired(op.query_result, key)) {
+                        op_status[idx_it->second] =
+                            tl::make_unexpected(ErrorCode::LEASE_EXPIRED);
+                        continue;
+                    }
                     op_status[idx_it->second] =
                         static_cast<int64_t>(op.total_size);
                 } else {
@@ -4699,6 +4714,7 @@ RealClient::batch_get_buffer_internal(
             }
         }
 
+        // Healed reads already checked their fresh lease in the recursive call.
         std::vector<DuplicateFanOutJob> dup_jobs;
         for (const auto &[dup_idx, primary_idx] : duplicate_disk_ops) {
             const auto &dup_op = disk_ops[dup_idx];
@@ -7279,6 +7295,12 @@ RealClient::batch_get_into_internal(
             if (!checksum_result) {
                 results[op.original_index] =
                     tl::make_unexpected(checksum_result.error());
+                continue;
+            }
+            if (IsLocalDiskMasterLeaseExpired(op.query_result,
+                                              offload_object_it.first)) {
+                results[op.original_index] =
+                    tl::make_unexpected(ErrorCode::LEASE_EXPIRED);
             }
         }
     }
@@ -9017,6 +9039,11 @@ RealClient::batch_get_into_multi_buffers_internal(
                     if (!checksum_result) {
                         results[op.original_index] =
                             tl::make_unexpected(checksum_result.error());
+                        continue;
+                    }
+                    if (IsLocalDiskMasterLeaseExpired(op.query_result, key)) {
+                        results[op.original_index] =
+                            tl::make_unexpected(ErrorCode::LEASE_EXPIRED);
                     }
                 }
             }
