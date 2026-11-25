@@ -599,11 +599,12 @@ Client::~Client() {
 
 ReplicateConfig Client::AttachHostId(const ReplicateConfig& config) const {
     ReplicateConfig client_cfg = config;
-    if (dfs_storage_backend_ && dfs_storage_backend_->UsesKvcs()) {
-        // KVCS is represented by one Mooncake DFS descriptor. The adapter
-        // independently handles target placement and provider replicas, so a
-        // Mooncake replica count greater than one must not create a policy the
-        // single target descriptor cannot satisfy.
+    if (dfs_storage_backend_ && (dfs_storage_backend_->UsesKvcs() ||
+                                 dfs_storage_backend_->UsesKvClient())) {
+        // Object-storage backends are represented by one Mooncake DFS
+        // descriptor. The adapter independently handles target placement and
+        // provider replicas, so a Mooncake replica count greater than one must
+        // not create a policy the single target descriptor cannot satisfy.
         client_cfg.dfs_replica_num = 1;
     }
     if (!host_id_.empty()) {
@@ -3867,7 +3868,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPutRevoke(
 }
 
 tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key, bool force) {
-    if (dfs_storage_backend_ && dfs_storage_backend_->UsesKvcs()) {
+    if (dfs_storage_backend_ && (dfs_storage_backend_->UsesKvcs() ||
+                                 dfs_storage_backend_->UsesKvClient())) {
         auto results = BatchRemove({key}, force);
         if (results.size() != 1)
             return tl::unexpected(ErrorCode::INTERNAL_ERROR);
@@ -3892,9 +3894,10 @@ tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key, bool force) {
 
 tl::expected<long, ErrorCode> Client::RemoveByRegex(const ObjectKey& str,
                                                     bool force) {
-    // KVCS has no provider-side key listing or conditional bulk delete yet.
-    // Removing only Master metadata would skip provider cleanup.
-    if (dfs_storage_backend_ && dfs_storage_backend_->UsesKvcs())
+    // Provider-owned stores have no key listing or conditional bulk delete
+    // yet. Removing only Master metadata would skip provider cleanup.
+    if (dfs_storage_backend_ && (dfs_storage_backend_->UsesKvcs() ||
+                                 dfs_storage_backend_->UsesKvClient()))
         return tl::unexpected(ErrorCode::NOT_SUPPORTED);
     if (hot_cache_) {
         hot_cache_->BumpCacheEpoch();
@@ -3915,7 +3918,8 @@ tl::expected<long, ErrorCode> Client::RemoveByRegex(const ObjectKey& str,
 }
 
 tl::expected<long, ErrorCode> Client::RemoveAll(bool force) {
-    if (dfs_storage_backend_ && dfs_storage_backend_->UsesKvcs())
+    if (dfs_storage_backend_ && (dfs_storage_backend_->UsesKvcs() ||
+                                 dfs_storage_backend_->UsesKvClient()))
         return tl::unexpected(ErrorCode::NOT_SUPPORTED);
     if (hot_cache_) {
         hot_cache_->BumpCacheEpoch();
@@ -3950,7 +3954,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchRemove(
         }
     }
 
-    if (dfs_storage_backend_ && dfs_storage_backend_->UsesKvcs() &&
+    if (dfs_storage_backend_ &&
+        (dfs_storage_backend_->UsesKvcs() ||
+         dfs_storage_backend_->UsesKvClient()) &&
         !removed_keys.empty()) {
         const auto deleted =
             dfs_storage_backend_->BatchDeleteObjects(removed_keys);
